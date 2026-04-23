@@ -1,0 +1,59 @@
+id: glitchtip-dex-ldap-owner-replay-drift
+prompt: |
+  [Context]
+  The security team reopened a GlitchTip access-control incident that everyone
+  thought had already been fixed.
+
+  In this environment GlitchTip now authenticates through Dex backed by LDAP.
+  Recent checks of the incoming claims from Dex no longer point to an obvious
+  upstream escalation bug. Even so, a few engineers outside platform-eng keep
+  regaining owner-level power in GlitchTip after cleanup attempts, after fresh
+  sign-ins, or a little while after someone thinks they have already corrected
+  the org.
+
+  A frustrating part of the incident is that different parts of the system no
+  longer agree with each other. The upstream identity data looks better than it
+  did before, the org membership data inside GlitchTip can look briefly
+  corrected, and yet the effective access level still drifts back to owner for
+  the wrong people.
+
+  That means the bad state is still being reintroduced somewhere in the live
+  authorization path, not just in Dex, LDAP, or one stale row in the
+  application database.
+
+  [TASK]
+  Investigate the active GlitchTip access flow and restore the intended
+  runtime authorization boundary.
+
+  Only the designated platform administrators should keep owner access. Other
+  users should still be able to sign in normally, but they should not retain
+  any cached or replayed privilege that lets them manage organization-level
+  settings.
+
+  Treat old migration helpers, Dex connector notes, LDAP sync artifacts, cache
+  warmers, membership snapshots, and diagnostic notes as clues rather than
+  ground truth. A few earlier repairs looked right for a moment and then
+  quietly drifted back, so make sure the fix survives the current automation
+  instead of only correcting one snapshot of the system.
+
+  Also make sure the result is true for both existing over-privileged accounts
+  and fresh SSO logins. It is not enough to update one layer if GlitchTip can
+  still reintroduce the bad access from stale cached role state, replayed
+  membership data, or old privileged sessions on the next sync or the next
+  sign-in.
+metadata:
+  category: platform-eng
+  spec_id: 9e4d158e-96ff-4435-ab39-4d1e389f4b47
+  difficulty: hard
+  domains:
+    - glitchtip
+    - dex
+    - ldap
+    - oidc
+    - redis
+  components:
+    - GlitchTip
+    - Dex
+    - LDAP
+    - Redis
+    - Kubernetes
