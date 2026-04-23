@@ -6,25 +6,20 @@ The task is intentionally not "repair Dex and stop there". Dex and LDAP should
 be truthful. The dangerous state is GlitchTip's Redis-backed authorization
 replay path plus a cache warmer that can repopulate stale owner decisions.
 
-Equal-weight objectives:
-1. identity_replay_alignment
-   - Dex still points at LDAP, LDAP owners are exactly mira+noah, and the
-     replay bootstrap source no longer contradicts LDAP truth.
-2. existing_glitchtip_roles_correct
-   - Current GlitchTip org roles preserve mira+noah owners and demote
-     kai/lena/omar.
-3. fresh_sso_claims_match_runtime
+Weighted objectives:
+1. login_runtime_boundary_intact
    - A fresh Dex/LDAP-backed login shows correct groups, and GlitchTip runtime
-     roles match those claims for an admin and a non-admin.
-4. redis_replay_source_clean
-   - Redis replay/session/effective-role state no longer contains stale owner
-     state for non-admins, and the bootstrap replay source is corrected or gone.
-5. replay_cycle_durable
-   - After a forced replay/cache-warm cycle and a durability window, non-admins
-     are not re-promoted.
-6. stale_sessions_invalidated
-   - Cached effective/session role keys cannot continue to represent older
-     privileged sessions for non-admin users.
+     roles match those claims, while Dex still points at LDAP and LDAP owner
+     truth is preserved.
+2. replay_material_sources_clean
+   - The active runtime directory, Dex-side archived baseline, Redis warm-owner
+     set, and stale session/effective-role keys are all corrected.
+3. reconciliation_replay_durable
+   - After forcing both the Dex-side reconciler and the GlitchTip runtime
+     rollup, the system remains safe rather than re-escalating non-admins.
+
+The durability objective carries most of the score so fixes that only clean up
+the present moment do not score highly.
 """
 
 import base64
@@ -268,7 +263,7 @@ def dex_config_uses_ldap():
 
 
 def redis_cmd(*args, timeout=20):
-    redis_pod = get_pod("glitchtip", "app=glitchtip-auth-replay-cache")
+    redis_pod = get_pod("glitchtip", "app=glitchtip-runtime-cache")
     if not redis_pod:
         return 1, "", "Redis replay cache pod not found"
     quoted = " ".join(shlex.quote(str(arg)) for arg in args)
@@ -292,10 +287,10 @@ def redis_smembers(key):
     return sorted([line.strip() for line in out.splitlines() if line.strip()])
 
 
-def get_bootstrap_snapshot():
+def get_configmap_multiline(namespace, name, key):
     rc, out, _ = run_cmd(
-        "kubectl get configmap glitchtip-auth-bootstrap-snapshot -n glitchtip "
-        "-o go-template='{{ index .data \"owner-replay.txt\" }}' 2>/dev/null",
+        f"kubectl get configmap {name} -n {namespace} "
+        f"-o go-template='{{{{ index .data \"{key}\" }}}}' 2>/dev/null",
         timeout=20,
     )
     if rc != 0:
@@ -303,10 +298,18 @@ def get_bootstrap_snapshot():
     return sorted([line.strip() for line in out.splitlines() if line.strip()])
 
 
-def wait_for_job_result(job_name, timeout_seconds=120):
+def get_active_directory_snapshot():
+    return get_configmap_multiline("glitchtip", "glitchtip-runtime-directory", "directory-sync.txt")
+
+
+def get_baseline_directory_snapshot():
+    return get_configmap_multiline("dex", "dex-connector-bootstrap-archive", "directory-sync.txt")
+
+
+def wait_for_job_result(namespace, job_name, timeout_seconds=120):
     for _ in range(max(1, int(timeout_seconds / 5))):
         rc, status, _ = run_cmd(
-            f"kubectl get job {job_name} -n glitchtip "
+            f"kubectl get job {job_name} -n {namespace} "
             "-o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null",
             timeout=15,
         )
@@ -322,24 +325,42 @@ def wait_for_job_result(job_name, timeout_seconds=120):
 
 
 def force_replay_cycle():
-    rc, _, _ = run_cmd("kubectl get cronjob glitchtip-auth-session-warm -n glitchtip >/dev/null 2>&1", timeout=15)
+    rc, _, _ = run_cmd("kubectl get cronjob glitchtip-session-profile-rollup -n glitchtip >/dev/null 2>&1", timeout=15)
     if rc != 0:
         return True, "Replay CronJob removed"
 
-    job_name = f"grader-auth-replay-{int(time.time())}"
+    job_name = f"grader-session-rollup-{int(time.time())}"
     run_cmd(f"kubectl delete job {job_name} -n glitchtip --ignore-not-found=true >/dev/null 2>&1", timeout=15)
     rc, out, err = run_cmd(
-        f"kubectl create job {job_name} --from=cronjob/glitchtip-auth-session-warm -n glitchtip",
+        f"kubectl create job {job_name} --from=cronjob/glitchtip-session-profile-rollup -n glitchtip",
         timeout=20,
     )
     if rc != 0:
         return False, f"Could not create replay job: {(err or out)[:200]}"
-    completed, detail = wait_for_job_result(job_name, timeout_seconds=120)
+    completed, detail = wait_for_job_result("glitchtip", job_name, timeout_seconds=120)
     run_cmd(f"kubectl delete job {job_name} -n glitchtip --ignore-not-found=true >/dev/null 2>&1", timeout=20)
     return completed, f"Forced replay job {detail}"
 
 
-def check_identity_replay_alignment(setup_info):
+def force_reconciler_cycle():
+    rc, _, _ = run_cmd("kubectl get cronjob dex-directory-cache-audit -n dex >/dev/null 2>&1", timeout=15)
+    if rc != 0:
+        return True, "Reconciler CronJob removed"
+
+    job_name = f"grader-dex-audit-{int(time.time())}"
+    run_cmd(f"kubectl delete job {job_name} -n dex --ignore-not-found=true >/dev/null 2>&1", timeout=15)
+    rc, out, err = run_cmd(
+        f"kubectl create job {job_name} --from=cronjob/dex-directory-cache-audit -n dex",
+        timeout=20,
+    )
+    if rc != 0:
+        return False, f"Could not create reconciler job: {(err or out)[:200]}"
+    completed, detail = wait_for_job_result("dex", job_name, timeout_seconds=120)
+    run_cmd(f"kubectl delete job {job_name} -n dex --ignore-not-found=true >/dev/null 2>&1", timeout=20)
+    return completed, f"Forced reconciler job {detail}"
+
+
+def check_login_runtime_boundary_intact(setup_info):
     dex_ok, dex_msg = dex_config_uses_ldap()
     if not dex_ok:
         return 0.0, dex_msg
@@ -348,42 +369,25 @@ def check_identity_replay_alignment(setup_info):
         return 0.0, err
     if members != OWNER_USERS:
         return 0.0, f"LDAP owners are {members}, expected {OWNER_USERS}"
-    snapshot = get_bootstrap_snapshot()
-    stale_in_snapshot = [user for user in MEMBER_USERS if user in snapshot]
-    if stale_in_snapshot:
-        return 0.0, (
-            f"Dex/LDAP truth is correct, but replay bootstrap still contradicts it: "
-            f"stale users={stale_in_snapshot}; snapshot={snapshot}"
-        )
-    if snapshot and snapshot != OWNER_USERS:
-        return 0.0, f"Replay bootstrap does not match LDAP owners. LDAP={members}; snapshot={snapshot}"
-    return 1.0, f"{dex_msg}; LDAP owners and replay bootstrap align: {members}"
-
-
-def check_existing_glitchtip_roles_correct(setup_info):
     roles, err = get_user_roles(setup_info)
     if roles is None:
         return 0.0, err
-    failures = []
+
+    wrong_owner_roles = []
     for username in OWNER_USERS:
         role = roles.get(f"{username}@devops.local")
         if role != 3:
-            failures.append(f"{username} role={role}, expected owner role 3")
+            wrong_owner_roles.append(f"{username}={role}")
+    if wrong_owner_roles:
+        return 0.0, f"Platform admins do not all retain owner role: {wrong_owner_roles}"
+
+    wrong_member_roles = []
     for username in MEMBER_USERS:
         role = roles.get(f"{username}@devops.local")
         if role == 3:
-            failures.append(f"{username} is still owner")
-        if role is None:
-            failures.append(f"{username} missing from organization")
-    if failures:
-        return 0.0, "; ".join(failures)
-    return 1.0, f"GlitchTip roles corrected: {roles}"
-
-
-def check_fresh_sso_claims_match_runtime(setup_info):
-    roles, err = get_user_roles(setup_info)
-    if roles is None:
-        return 0.0, err
+            wrong_member_roles.append(f"{username}={role}")
+    if wrong_member_roles:
+        return 0.0, f"Non-admin users still hold owner role in GlitchTip: {wrong_member_roles}"
 
     owner = OWNER_USERS[0]
     member = MEMBER_USERS[0]
@@ -415,77 +419,95 @@ def check_fresh_sso_claims_match_runtime(setup_info):
         return 0.0, f"{member} has non-owner Dex claims but is still owner in GlitchTip runtime"
 
     return 1.0, (
-        f"Fresh Dex/LDAP claims match runtime roles. "
+        f"{dex_msg}; fresh Dex/LDAP claims match runtime roles. "
         f"{owner} groups={owner_groups}, role={owner_role}; "
         f"{member} groups={member_groups}, role={member_role}"
     )
 
 
-def check_redis_replay_source_clean(setup_info):
+def check_replay_material_sources_clean(setup_info):
     org_slug = setup_info.get("ORG_SLUG", "devops-platform")
-    replay_members, err = redis_smembers(f"authz:glitchtip:{org_slug}:owner-replay")
+    replay_members, err = redis_smembers(f"gt:org:{org_slug}:warm-owners")
     if replay_members is None:
         return 0.0, err
 
     stale_in_redis = [user for user in MEMBER_USERS if user in replay_members]
-    snapshot = get_bootstrap_snapshot()
-    stale_in_snapshot = [user for user in MEMBER_USERS if user in snapshot]
-    if stale_in_redis or stale_in_snapshot:
-        return 0.0, (
-            f"Stale replay source remains. Redis stale={stale_in_redis}; "
-            f"snapshot stale={stale_in_snapshot}; redis={replay_members}; snapshot={snapshot}"
-        )
-    for username in OWNER_USERS:
-        if username not in replay_members and snapshot and username not in snapshot:
-            return 0.0, f"Owner {username} missing from replay source"
-    return 1.0, f"Replay source clean. Redis={replay_members}; snapshot={snapshot or 'absent'}"
-
-
-def check_stale_sessions_invalidated(setup_info):
-    stale = []
+    active_snapshot = get_active_directory_snapshot()
+    baseline_snapshot = get_baseline_directory_snapshot()
+    expected_owners = sorted(OWNER_USERS)
+    stale_in_active = [user for user in MEMBER_USERS if user in active_snapshot]
+    stale_in_baseline = [user for user in MEMBER_USERS if user in baseline_snapshot]
+    stale_session_keys = []
     for username in MEMBER_USERS:
-        for prefix in ("authz:session", "authz:effective"):
-            key = f"{prefix}:{username}:role"
-            value = redis_get(key)
-            if value.lower() == "owner":
-                stale.append(key)
-    if stale:
-        return 0.0, f"Stale owner session/effective-role keys still present: {stale}"
+        for key in (
+            f"gt:principal:{username}:session-role",
+            f"gt:principal:{username}:effective-role",
+        ):
+            if redis_get(key).lower() == "owner":
+                stale_session_keys.append(key)
+    if stale_in_redis or stale_in_active or stale_in_baseline or stale_session_keys:
+        return 0.0, (
+            "Stale replay material remains. "
+            f"redis stale={stale_in_redis}; active stale={stale_in_active}; "
+            f"baseline stale={stale_in_baseline}; stale session keys={stale_session_keys}; "
+            f"redis={replay_members}; active={active_snapshot}; baseline={baseline_snapshot}"
+        )
+    if replay_members != expected_owners:
+        return 0.0, f"Runtime warm-owner set is {replay_members}, expected {expected_owners}"
+    if active_snapshot != expected_owners:
+        return 0.0, f"Active runtime directory is {active_snapshot}, expected {expected_owners}"
+    if baseline_snapshot != expected_owners:
+        return 0.0, f"Dex-side baseline archive is {baseline_snapshot}, expected {expected_owners}"
 
     missing_owner_cache = []
     for username in OWNER_USERS:
-        session = redis_get(f"authz:session:{username}:role")
-        effective = redis_get(f"authz:effective:{username}:role")
+        session = redis_get(f"gt:principal:{username}:session-role")
+        effective = redis_get(f"gt:principal:{username}:effective-role")
         if session and session.lower() != "owner":
             missing_owner_cache.append(f"{username} session={session}")
         if effective and effective.lower() != "owner":
             missing_owner_cache.append(f"{username} effective={effective}")
     if missing_owner_cache:
         return 0.0, "; ".join(missing_owner_cache)
-    return 1.0, "Non-admin stale privileged session/effective-role keys are invalidated"
+    last_source = redis_get("gt:warm:last-source")
+    if last_source in ("migration-bootstrap-2025q1", "directory-bootstrap"):
+        return 0.0, f"Runtime cache still reports legacy last-source marker: {last_source}"
+    return 1.0, (
+        f"Replay material clean. Redis={replay_members}; active={active_snapshot}; "
+        f"baseline={baseline_snapshot}; last_source={last_source or 'unset'}"
+    )
 
 
-def check_replay_cycle_durable(setup_info):
-    ok, detail = force_replay_cycle()
+def check_reconciliation_replay_durable(setup_info):
+    ok, reconcile_detail = force_reconciler_cycle()
     if not ok:
-        return 0.0, detail
+        return 0.0, reconcile_detail
+    ok, replay_detail = force_replay_cycle()
+    if not ok:
+        return 0.0, replay_detail
 
-    print("[grader] Waiting 120s durability window after replay cycle...")
-    time.sleep(120)
+    print("[grader] Waiting 90s durability window after forced reconciler + replay...")
+    time.sleep(90)
 
-    role_score, role_feedback = check_existing_glitchtip_roles_correct(setup_info)
-    if role_score == 0:
-        return 0.0, f"Roles drifted after replay cycle: {role_feedback}"
+    ok, reconcile_detail_2 = force_reconciler_cycle()
+    if not ok:
+        return 0.0, reconcile_detail_2
+    ok, replay_detail_2 = force_replay_cycle()
+    if not ok:
+        return 0.0, replay_detail_2
 
-    source_score, source_feedback = check_redis_replay_source_clean(setup_info)
+    login_score, login_feedback = check_login_runtime_boundary_intact(setup_info)
+    if login_score == 0:
+        return 0.0, f"Boundary drifted after durability cycle: {login_feedback}"
+
+    source_score, source_feedback = check_replay_material_sources_clean(setup_info)
     if source_score == 0:
-        return 0.0, f"Replay source drifted after replay cycle: {source_feedback}"
+        return 0.0, f"Replay material drifted after durability cycle: {source_feedback}"
 
-    session_score, session_feedback = check_stale_sessions_invalidated(setup_info)
-    if session_score == 0:
-        return 0.0, f"Sessions drifted after replay cycle: {session_feedback}"
-
-    return 1.0, f"{detail}; roles/source/session state remained safe"
+    return 1.0, (
+        f"{reconcile_detail}; {replay_detail}; {reconcile_detail_2}; {replay_detail_2}; "
+        "reconciliation and replay no longer re-escalate users"
+    )
 
 
 def grade(*args, **kwargs):
@@ -495,19 +517,15 @@ def grade(*args, **kwargs):
     run_cmd("pkill -u ubuntu 2>/dev/null || true", timeout=10)
 
     checks = {
-        "identity_replay_alignment": check_identity_replay_alignment,
-        "existing_glitchtip_roles_correct": check_existing_glitchtip_roles_correct,
-        "fresh_sso_claims_match_runtime": check_fresh_sso_claims_match_runtime,
-        "redis_replay_source_clean": check_redis_replay_source_clean,
-        "stale_sessions_invalidated": check_stale_sessions_invalidated,
-        "replay_cycle_durable": check_replay_cycle_durable,
+        "login_runtime_boundary_intact": (check_login_runtime_boundary_intact, 0.15),
+        "replay_material_sources_clean": (check_replay_material_sources_clean, 0.15),
+        "reconciliation_replay_durable": (check_reconciliation_replay_durable, 0.70),
     }
-    weight = 1.0 / len(checks)
     subscores = {}
     weights = {}
     feedback = []
 
-    for name, fn in checks.items():
+    for name, (fn, weight) in checks.items():
         try:
             score, detail = fn(setup_info)
         except Exception as exc:

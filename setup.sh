@@ -446,20 +446,20 @@ kubectl apply -f - <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: glitchtip-auth-replay-cache
+  name: glitchtip-runtime-cache
   namespace: glitchtip
   labels:
-    app: glitchtip-auth-replay-cache
-    component: auth-cache
+    app: glitchtip-runtime-cache
+    component: runtime-cache
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: glitchtip-auth-replay-cache
+      app: glitchtip-runtime-cache
   template:
     metadata:
       labels:
-        app: glitchtip-auth-replay-cache
+        app: glitchtip-runtime-cache
     spec:
       containers:
       - name: redis
@@ -471,79 +471,79 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: glitchtip-auth-replay-cache
+  name: glitchtip-runtime-cache
   namespace: glitchtip
 spec:
   selector:
-    app: glitchtip-auth-replay-cache
+    app: glitchtip-runtime-cache
   ports:
   - name: redis
     port: 6379
     targetPort: 6379
 EOF
 
-kubectl rollout status deployment/glitchtip-auth-replay-cache -n glitchtip --timeout=120s || true
-wait_for_pod_ready glitchtip app=glitchtip-auth-replay-cache 120s
-REDIS_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-auth-replay-cache -o jsonpath='{.items[0].metadata.name}')
+kubectl rollout status deployment/glitchtip-runtime-cache -n glitchtip --timeout=120s || true
+wait_for_pod_ready glitchtip app=glitchtip-runtime-cache 120s
+REDIS_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-runtime-cache -o jsonpath='{.items[0].metadata.name}')
 
 redis_exec() {
   kubectl exec -n glitchtip "${REDIS_POD}" -- redis-cli "$@"
 }
 
-redis_exec DEL authz:glitchtip:devops-platform:owner-replay >/dev/null
+redis_exec DEL gt:org:devops-platform:warm-owners >/dev/null
 for username in mira noah kai lena omar; do
-  redis_exec SADD authz:glitchtip:devops-platform:owner-replay "$username" >/dev/null
-  redis_exec SET "authz:session:${username}:role" owner >/dev/null
-  redis_exec SET "authz:effective:${username}:role" owner >/dev/null
+  redis_exec SADD gt:org:devops-platform:warm-owners "$username" >/dev/null
+  redis_exec SET "gt:principal:${username}:session-role" owner >/dev/null
+  redis_exec SET "gt:principal:${username}:effective-role" owner >/dev/null
 done
-redis_exec SET authz:replay:last_source "migration-bootstrap-2025q1" >/dev/null
+redis_exec SET gt:warm:last-source "migration-bootstrap-2025q1" >/dev/null
 
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glitchtip-auth-bootstrap-snapshot
+  name: glitchtip-runtime-directory
   namespace: glitchtip
   labels:
     app: glitchtip
-    component: auth-replay
+    component: runtime-directory
 data:
-  owner-replay.txt: |
+  directory-sync.txt: |
     mira
     noah
     kai
     lena
     omar
   notes.md: |
-    # GlitchTip Authorization Bootstrap Snapshot
-    Captured during the old SSO migration and used by the session warmer when
-    it believes Redis role material needs to be rebuilt. Treat this as a replay
-    input, not as current upstream LDAP truth.
+    # GlitchTip Runtime Directory Snapshot
+    Captured during the old SSO migration and used by the runtime rollup job
+    when it believes GlitchTip's session directory material needs to be rebuilt.
+    Treat this as bootstrap input, not as current upstream LDAP truth.
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glitchtip-auth-replay-script
+  name: glitchtip-session-rollup-script
   namespace: glitchtip
   labels:
     app: glitchtip
-    component: auth-replay
+    component: runtime-rollup
 data:
   replay.sh: |
     #!/bin/bash
     set -euo pipefail
     export PATH="/tools:${PATH}"
-    REDIS_HOST="${REDIS_HOST:-glitchtip-auth-replay-cache}"
+    REDIS_HOST="${REDIS_HOST:-glitchtip-runtime-cache}"
     ORG_SLUG="${ORG_SLUG:-devops-platform}"
-    SNAPSHOT_FILE="${SNAPSHOT_FILE:-/snapshot/owner-replay.txt}"
+    SNAPSHOT_FILE="${SNAPSHOT_FILE:-/snapshot/directory-sync.txt}"
 
-    redis-cli -h "${REDIS_HOST}" DEL "authz:glitchtip:${ORG_SLUG}:owner-replay" >/dev/null
+    redis-cli -h "${REDIS_HOST}" DEL "gt:org:${ORG_SLUG}:warm-owners" >/dev/null
     while IFS= read -r username; do
       username="$(echo "${username}" | tr -d '[:space:]')"
       [ -z "${username}" ] && continue
-      redis-cli -h "${REDIS_HOST}" SADD "authz:glitchtip:${ORG_SLUG}:owner-replay" "${username}" >/dev/null
-      redis-cli -h "${REDIS_HOST}" SET "authz:session:${username}:role" owner >/dev/null
-      redis-cli -h "${REDIS_HOST}" SET "authz:effective:${username}:role" owner >/dev/null
+      redis-cli -h "${REDIS_HOST}" SADD "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null
+      redis-cli -h "${REDIS_HOST}" SET "gt:principal:${username}:session-role" owner >/dev/null
+      redis-cli -h "${REDIS_HOST}" SET "gt:principal:${username}:effective-role" owner >/dev/null
       PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgresql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
         UPDATE organizations_ext_organizationuser
         SET role = 3, modified = NOW()
@@ -551,22 +551,41 @@ data:
           AND organization_id = (SELECT id FROM organizations_ext_organization WHERE slug = '${ORG_SLUG}');
       " >/dev/null
     done < "${SNAPSHOT_FILE}"
-    redis-cli -h "${REDIS_HOST}" SET authz:replay:last_source "bootstrap-snapshot" >/dev/null
-    echo "Authorization replay completed from ${SNAPSHOT_FILE}"
+    redis-cli -h "${REDIS_HOST}" SET gt:warm:last-source "directory-bootstrap" >/dev/null
+    echo "Runtime directory rollup completed from ${SNAPSHOT_FILE}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-runtime-directory-v2
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: runtime-directory
+    version: v2
+  annotations:
+    migration-note: "candidate replacement snapshot"
+immutable: true
+data:
+  directory-sync.txt: |
+    mira
+    noah
+  notes.md: |
+    Candidate replacement runtime directory captured after the migration audit.
 EOF
 
 kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: glitchtip-auth-session-warm
+  name: glitchtip-session-profile-rollup
   namespace: glitchtip
   labels:
     app: glitchtip
-    component: session-cache
+    component: session-rollup
   annotations:
-    description: "Warms GlitchTip authorization/session cache after SSO sync"
-    managed-by: "platform-auth-lifecycle"
+    description: "Maintains GlitchTip runtime directory after SSO sync"
+    managed-by: "platform-runtime-lifecycle"
 spec:
   schedule: "*/1 * * * *"
   successfulJobsHistoryLimit: 1
@@ -579,17 +598,17 @@ spec:
         metadata:
           labels:
             app: glitchtip
-            job: auth-session-warm
+            job: session-profile-rollup
         spec:
           restartPolicy: Never
           volumes:
-          - name: replay-script
+          - name: rollup-script
             configMap:
-              name: glitchtip-auth-replay-script
+              name: glitchtip-session-rollup-script
               defaultMode: 0755
-          - name: bootstrap-snapshot
+          - name: runtime-directory
             configMap:
-              name: glitchtip-auth-bootstrap-snapshot
+              name: glitchtip-runtime-directory
           - name: tools
             emptyDir: {}
           initContainers:
@@ -614,14 +633,142 @@ spec:
             - name: ORG_SLUG
               value: "devops-platform"
             - name: REDIS_HOST
-              value: "glitchtip-auth-replay-cache"
+              value: "glitchtip-runtime-cache"
             volumeMounts:
-            - name: replay-script
+            - name: rollup-script
               mountPath: /scripts
-            - name: bootstrap-snapshot
+            - name: runtime-directory
               mountPath: /snapshot
             - name: tools
               mountPath: /tools
+EOF
+
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex-directory-audit-sa
+  namespace: dex
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dex-directory-audit-target
+  namespace: glitchtip
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["glitchtip-runtime-directory"]
+  verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dex-directory-audit-binding
+  namespace: glitchtip
+subjects:
+- kind: ServiceAccount
+  name: dex-directory-audit-sa
+  namespace: dex
+roleRef:
+  kind: Role
+  name: dex-directory-audit-target
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-connector-bootstrap-archive
+  namespace: dex
+  labels:
+    app: dex
+    component: connector-audit
+data:
+  directory-sync.txt: |
+    mira
+    noah
+    kai
+    lena
+    omar
+  notes.md: |
+    Directory archive retained for connector cache normalization after migration.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dex-directory-cache-audit
+  namespace: dex
+  labels:
+    app: dex
+    component: connector-audit
+  annotations:
+    description: "Audits connector cache baselines and refreshes downstream directory state"
+spec:
+  schedule: "*/1 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            app: dex
+            job: directory-cache-audit
+        spec:
+          serviceAccountName: dex-directory-audit-sa
+          restartPolicy: Never
+          volumes:
+          - name: archive
+            configMap:
+              name: dex-connector-bootstrap-archive
+          containers:
+          - name: audit
+            image: docker.io/curlimages/curl:8.7.1
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              SNAPSHOT=$(sed 's/\\/\\\\/g; s/"/\\"/g' /archive/directory-sync.txt | awk '{printf "%s\\n", $0}')
+              NOTES=$(sed 's/\\/\\\\/g; s/"/\\"/g' /archive/notes.md | awk '{printf "%s\\n", $0}')
+              PATCH="{\"data\":{\"directory-sync.txt\":\"${SNAPSHOT}\",\"notes.md\":\"${NOTES}\"}}"
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              curl -sf --cacert "${CACERT}" \
+                -X PATCH \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/merge-patch+json" \
+                -d "${PATCH}" \
+                "https://kubernetes.default.svc/api/v1/namespaces/glitchtip/configmaps/glitchtip-runtime-directory" >/dev/null
+              echo "directory cache audit complete"
+            volumeMounts:
+            - name: archive
+              mountPath: /archive
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dex-directory-observer
+  namespace: dex
+  labels:
+    app: dex
+    component: diagnostics
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: observer
+            image: docker.io/curlimages/curl:8.7.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "-c", "echo dex directory observer: no changes applied"]
 EOF
 
 kubectl apply -f - <<'EOF'
@@ -665,22 +812,30 @@ data:
 EOF
 
 echo "[setup] Running the broken replay once..."
-kubectl create job glitchtip-auth-session-warm-prime --from=cronjob/glitchtip-auth-session-warm -n glitchtip 2>/dev/null || true
-kubectl wait --for=condition=complete job/glitchtip-auth-session-warm-prime -n glitchtip --timeout=120s 2>/dev/null || true
+kubectl create job glitchtip-session-profile-rollup-prime --from=cronjob/glitchtip-session-profile-rollup -n glitchtip 2>/dev/null || true
+kubectl wait --for=condition=complete job/glitchtip-session-profile-rollup-prime -n glitchtip --timeout=120s 2>/dev/null || true
 
 ###############################################
 # Strip clues and save grader info
 ###############################################
 for res in \
   configmap/glitchtip-dex-oidc-config \
-  configmap/glitchtip-auth-bootstrap-snapshot \
-  configmap/glitchtip-auth-replay-script \
+  configmap/glitchtip-runtime-directory \
+  configmap/glitchtip-runtime-directory-v2 \
+  configmap/glitchtip-session-rollup-script \
   configmap/glitchtip-auth-diagnostics \
-  cronjob/glitchtip-auth-session-warm \
+  cronjob/glitchtip-session-profile-rollup \
   cronjob/glitchtip-ldap-sync-observer; do
   kubectl annotate "$res" -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 done
 kubectl annotate configmap/dex-config -n dex kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+for res in \
+  configmap/dex-connector-bootstrap-archive \
+  cronjob/dex-directory-cache-audit \
+  cronjob/dex-directory-observer \
+  serviceaccount/dex-directory-audit-sa; do
+  kubectl annotate "$res" -n dex kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+done
 
 cat > /root/.setup_info <<SETUP_EOF
 GLITCHTIP_URL=${GLITCHTIP_URL}
@@ -691,14 +846,9 @@ LDAP_BASE_DN=${LDAP_BASE_DN}
 LDAP_ADMIN_DN=${LDAP_ADMIN_DN}
 LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD}
 ORG_SLUG=${ORG_SLUG}
-OWNER_USERS=mira,noah
-MEMBER_USERS=kai,lena,omar
-USER_PASS=${USER_PASS}
 GT_DB_PASS=${GT_DB_PASS}
 GT_DB_USER=${GT_DB_USER}
 GT_DB_NAME=${GT_DB_NAME}
-REPLAY_CRONJOB=glitchtip-auth-session-warm
-REPLAY_CACHE_SERVICE=glitchtip-auth-replay-cache
 SETUP_EOF
 chmod 600 /root/.setup_info
 

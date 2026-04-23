@@ -11,11 +11,12 @@ LDAP_ADMIN_DN="cn=admin,dc=devops,dc=local"
 echo "[solution] Inspecting active Dex, LDAP, GlitchTip, and replay-cache resources..."
 kubectl get configmap dex-config -n dex >/dev/null
 kubectl get deployment openldap -n ldap >/dev/null
-kubectl get deployment glitchtip-auth-replay-cache -n glitchtip >/dev/null
-kubectl get configmap glitchtip-auth-bootstrap-snapshot -n glitchtip >/dev/null
+kubectl get deployment glitchtip-runtime-cache -n glitchtip >/dev/null
+kubectl get configmap glitchtip-runtime-directory -n glitchtip >/dev/null
+kubectl get configmap dex-connector-bootstrap-archive -n dex >/dev/null
 
 PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
-REDIS_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-auth-replay-cache -o jsonpath='{.items[0].metadata.name}')
+REDIS_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-runtime-cache -o jsonpath='{.items[0].metadata.name}')
 LDAP_POD=$(kubectl get pods -n ldap -l app=openldap -o jsonpath='{.items[0].metadata.name}')
 LDAP_ADMIN_PASSWORD=$(kubectl get deployment openldap -n ldap -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LDAP_ADMIN_PASSWORD")].value}')
 
@@ -49,26 +50,31 @@ MEMBER_USERS=$(echo "${MEMBER_USERS}" | xargs)
 echo "[solution] LDAP-designated owners: ${OWNER_USERS}"
 echo "[solution] LDAP-designated non-owner users: ${MEMBER_USERS}"
 
-echo "[solution] Correcting the replay bootstrap source to the intended owner set..."
-OWNER_REPLAY_LITERAL=$(printf '%s\n' ${OWNER_USERS})
-kubectl create configmap glitchtip-auth-bootstrap-snapshot \
+echo "[solution] Correcting both the live runtime directory and the Dex-side archived baseline..."
+OWNER_DIRECTORY_LITERAL=$(printf '%s\n' ${OWNER_USERS})
+kubectl create configmap glitchtip-runtime-directory \
   -n glitchtip \
-  --from-literal=owner-replay.txt="${OWNER_REPLAY_LITERAL}" \
-  --from-literal=notes.md="Current replay bootstrap source rebuilt from the Dex/LDAP owner group." \
+  --from-literal=directory-sync.txt="${OWNER_DIRECTORY_LITERAL}" \
+  --from-literal=notes.md="Current runtime directory rebuilt from the Dex/LDAP owner group." \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create configmap dex-connector-bootstrap-archive \
+  -n dex \
+  --from-literal=directory-sync.txt="${OWNER_DIRECTORY_LITERAL}" \
+  --from-literal=notes.md="Connector archive aligned to current Dex/LDAP owner truth." \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo "[solution] Rebuilding Redis replay and session state from current identity truth..."
-redis_cli DEL "authz:glitchtip:${ORG_SLUG}:owner-replay" >/dev/null
+redis_cli DEL "gt:org:${ORG_SLUG}:warm-owners" >/dev/null
 for username in ${OWNER_USERS}; do
-  redis_cli SADD "authz:glitchtip:${ORG_SLUG}:owner-replay" "${username}" >/dev/null
-  redis_cli SET "authz:session:${username}:role" owner >/dev/null
-  redis_cli SET "authz:effective:${username}:role" owner >/dev/null
+  redis_cli SADD "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null
+  redis_cli SET "gt:principal:${username}:session-role" owner >/dev/null
+  redis_cli SET "gt:principal:${username}:effective-role" owner >/dev/null
 done
 for username in ${MEMBER_USERS}; do
-  redis_cli SREM "authz:glitchtip:${ORG_SLUG}:owner-replay" "${username}" >/dev/null || true
-  redis_cli DEL "authz:session:${username}:role" "authz:effective:${username}:role" >/dev/null || true
+  redis_cli SREM "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null || true
+  redis_cli DEL "gt:principal:${username}:session-role" "gt:principal:${username}:effective-role" >/dev/null || true
 done
-redis_cli SET authz:replay:last_source "corrected-dex-ldap-truth" >/dev/null
+redis_cli SET gt:warm:last-source "corrected-dex-ldap-truth" >/dev/null
 
 echo "[solution] Repairing durable GlitchTip organization roles..."
 ORG_ID=$(gt_sql "SELECT id FROM organizations_ext_organization WHERE slug='${ORG_SLUG}' LIMIT 1;")
@@ -89,21 +95,28 @@ for username in ${MEMBER_USERS}; do
 done
 
 echo "[solution] Forcing the cache warmer once to prove the corrected source no longer replays stale owners..."
-kubectl delete job glitchtip-auth-session-warm-verify -n glitchtip --ignore-not-found=true >/dev/null 2>&1 || true
-if kubectl get cronjob glitchtip-auth-session-warm -n glitchtip >/dev/null 2>&1; then
-  kubectl create job glitchtip-auth-session-warm-verify --from=cronjob/glitchtip-auth-session-warm -n glitchtip >/dev/null
-  kubectl wait --for=condition=complete job/glitchtip-auth-session-warm-verify -n glitchtip --timeout=120s >/dev/null 2>&1 || true
-  kubectl delete job glitchtip-auth-session-warm-verify -n glitchtip --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete job dex-directory-cache-audit-verify -n dex --ignore-not-found=true >/dev/null 2>&1 || true
+if kubectl get cronjob dex-directory-cache-audit -n dex >/dev/null 2>&1; then
+  kubectl create job dex-directory-cache-audit-verify --from=cronjob/dex-directory-cache-audit -n dex >/dev/null
+  kubectl wait --for=condition=complete job/dex-directory-cache-audit-verify -n dex --timeout=120s >/dev/null 2>&1 || true
+  kubectl delete job dex-directory-cache-audit-verify -n dex --ignore-not-found=true >/dev/null 2>&1 || true
+fi
+kubectl delete job glitchtip-session-profile-rollup-verify -n glitchtip --ignore-not-found=true >/dev/null 2>&1 || true
+if kubectl get cronjob glitchtip-session-profile-rollup -n glitchtip >/dev/null 2>&1; then
+  kubectl create job glitchtip-session-profile-rollup-verify --from=cronjob/glitchtip-session-profile-rollup -n glitchtip >/dev/null
+  kubectl wait --for=condition=complete job/glitchtip-session-profile-rollup-verify -n glitchtip --timeout=120s >/dev/null 2>&1 || true
+  kubectl delete job glitchtip-session-profile-rollup-verify -n glitchtip --ignore-not-found=true >/dev/null 2>&1 || true
 fi
 
 echo "[solution] Reasserting final safe state after replay verification..."
 for username in ${MEMBER_USERS}; do
-  redis_cli DEL "authz:session:${username}:role" "authz:effective:${username}:role" >/dev/null || true
+  redis_cli DEL "gt:principal:${username}:session-role" "gt:principal:${username}:effective-role" >/dev/null || true
   gt_sql "UPDATE organizations_ext_organizationuser SET role=0, modified=NOW() WHERE user_id=(SELECT id FROM users_user WHERE email='${username}@devops.local') AND organization_id=${ORG_ID};" >/dev/null
 done
+redis_cli SET gt:warm:last-source "corrected-dex-ldap-truth" >/dev/null
 
 echo "[solution] Final Redis owner replay set:"
-redis_cli SMEMBERS "authz:glitchtip:${ORG_SLUG}:owner-replay" | sort
+redis_cli SMEMBERS "gt:org:${ORG_SLUG}:warm-owners" | sort
 
 echo "[solution] Final GlitchTip roles:"
 gt_sql "SELECT u.email || '=' || ou.role FROM organizations_ext_organizationuser ou JOIN users_user u ON u.id=ou.user_id JOIN organizations_ext_organization o ON o.id=ou.organization_id WHERE o.slug='${ORG_SLUG}' ORDER BY u.email;"
