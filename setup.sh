@@ -20,14 +20,20 @@ sleep 5
 for img in /var/lib/rancher/k3s/agent/images/*.tar; do
   imgname=$(basename "$img")
   echo "[setup] Importing ${imgname}..."
+  imported=0
   for attempt in $(seq 1 5); do
     if $CTR images import "$img" 2>&1; then
       echo "[setup] ${imgname} imported."
+      imported=1
       break
     fi
     echo "[setup] Retry ${attempt}/5 for ${imgname}..."
     sleep 10
   done
+  if [ "$imported" -ne 1 ]; then
+    echo "[setup] Failed to import ${imgname} after 5 attempts."
+    exit 1
+  fi
 done
 
 echo "[setup] Scaling down non-essential workloads..."
@@ -130,17 +136,23 @@ spec:
     spec:
       containers:
       - name: openldap
-        image: docker.io/osixia/openldap:1.5.0
+        image: docker.io/bitnamilegacy/openldap:2.6.10-debian-12-r4
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 389
         env:
-        - name: LDAP_ORGANISATION
-          value: "Nebula DevOps"
+        - name: LDAP_ROOT
+          value: "${LDAP_BASE_DN}"
+        - name: LDAP_PORT_NUMBER
+          value: "389"
+        - name: LDAP_ADMIN_USERNAME
+          value: "admin"
         - name: LDAP_DOMAIN
           value: "devops.local"
         - name: LDAP_ADMIN_PASSWORD
           value: "${LDAP_ADMIN_PASSWORD}"
+        - name: LDAP_ENABLE_TLS
+          value: "no"
 ---
 apiVersion: v1
 kind: Service
