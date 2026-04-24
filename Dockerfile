@@ -22,6 +22,9 @@ RUN mkdir -p /var/lib/rancher/k3s/agent/images && \
       docker://docker.io/bitnamilegacy/openldap:2.6.10-debian-12-r4 \
       docker-archive:/var/lib/rancher/k3s/agent/images/openldap.tar:docker.io/bitnamilegacy/openldap:2.6.10-debian-12-r4 && \
     skopeo copy --override-os linux --override-arch amd64 \
+      docker://docker.io/bitnamilegacy/postgresql:17.0.0-debian-12-r11 \
+      docker-archive:/var/lib/rancher/k3s/agent/images/postgresql.tar:docker.io/bitnamilegacy/postgresql:17.0.0-debian-12-r11 && \
+    skopeo copy --override-os linux --override-arch amd64 \
       docker://docker.io/redis:7-alpine \
       docker-archive:/var/lib/rancher/k3s/agent/images/redis.tar:docker.io/redis:7-alpine && \
     skopeo copy --override-os linux --override-arch amd64 \

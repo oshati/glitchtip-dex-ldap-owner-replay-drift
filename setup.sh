@@ -570,7 +570,7 @@ data:
     SNAPSHOT_FILE="${SNAPSHOT_FILE:-/snapshot/directory-sync.txt}"
 
     redis-cli -h "${REDIS_HOST}" DEL "gt:org:${ORG_SLUG}:warm-owners" >/dev/null
-    while IFS= read -r username; do
+    while IFS= read -r username || [ -n "${username:-}" ]; do
       username="$(echo "${username}" | tr -d '[:space:]')"
       [ -z "${username}" ] && continue
       redis-cli -h "${REDIS_HOST}" SADD "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null
