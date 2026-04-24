@@ -64,6 +64,7 @@ kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/nul
 GLITCHTIP_URL="http://glitchtip.devops.local"
 DEX_URL="http://dex.dex.svc.cluster.local:5556"
 DEX_PUBLIC_URL="http://dex.devops.local"
+LDAP_URI="ldap://openldap.ldap.svc.cluster.local:389"
 LDAP_BASE_DN="dc=devops,dc=local"
 LDAP_ADMIN_DN="cn=admin,dc=devops,dc=local"
 LDAP_ADMIN_PASSWORD="ldap-admin-2026"
@@ -169,9 +170,14 @@ spec:
 EOF
 
 wait_for_pod_ready ldap app=openldap 180s
-LDAP_POD=$(kubectl get pods -n ldap -l app=openldap -o jsonpath='{.items[0].metadata.name}')
-
 cat > /tmp/glitchtip-users.ldif <<'LDIF'
+dn: dc=devops,dc=local
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: Nebula DevOps
+dc: devops
+
 dn: ou=people,dc=devops,dc=local
 objectClass: organizationalUnit
 ou: people
@@ -253,8 +259,22 @@ uniqueMember: uid=lena,ou=people,dc=devops,dc=local
 uniqueMember: uid=omar,ou=people,dc=devops,dc=local
 LDIF
 
-kubectl cp /tmp/glitchtip-users.ldif "ldap/${LDAP_POD}:/tmp/glitchtip-users.ldif"
-kubectl exec -n ldap "${LDAP_POD}" -- ldapadd -x -D "${LDAP_ADMIN_DN}" -w "${LDAP_ADMIN_PASSWORD}" -f /tmp/glitchtip-users.ldif >/dev/null 2>&1 || true
+LDAP_VERIFY_DN="cn=glitchtip-owners,ou=groups,${LDAP_BASE_DN}"
+for attempt in $(seq 1 10); do
+  ldapadd -x -H "${LDAP_URI}" -D "${LDAP_ADMIN_DN}" -w "${LDAP_ADMIN_PASSWORD}" \
+    -c -f /tmp/glitchtip-users.ldif >/tmp/ldap-bootstrap.log 2>&1 || true
+  if ldapsearch -x -H "${LDAP_URI}" -D "${LDAP_ADMIN_DN}" -w "${LDAP_ADMIN_PASSWORD}" \
+      -b "${LDAP_VERIFY_DN}" -s base cn >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+if ! ldapsearch -x -H "${LDAP_URI}" -D "${LDAP_ADMIN_DN}" -w "${LDAP_ADMIN_PASSWORD}" \
+    -b "${LDAP_VERIFY_DN}" -s base cn >/dev/null 2>&1; then
+  echo "[setup] LDAP bootstrap verification failed."
+  cat /tmp/ldap-bootstrap.log
+  exit 1
+fi
 
 ###############################################
 # Dex: OIDC facade backed by LDAP
@@ -857,6 +877,7 @@ DEX_CLIENT_SECRET=${DEX_CLIENT_SECRET}
 LDAP_BASE_DN=${LDAP_BASE_DN}
 LDAP_ADMIN_DN=${LDAP_ADMIN_DN}
 LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD}
+LDAP_URI=${LDAP_URI}
 ORG_SLUG=${ORG_SLUG}
 GT_DB_PASS=${GT_DB_PASS}
 GT_DB_USER=${GT_DB_USER}

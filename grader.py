@@ -225,14 +225,15 @@ def get_user_roles(setup_info):
 
 
 def get_ldap_owner_members(setup_info):
-    ldap_pod = get_pod("ldap", "app=openldap")
-    if not ldap_pod:
-        return None, "LDAP pod not found"
+    rc, _, err = run_cmd("kubectl get deployment openldap -n ldap >/dev/null 2>&1", timeout=20)
+    if rc != 0:
+        return None, err or "LDAP deployment not found"
+    ldap_uri = setup_info.get("LDAP_URI", "ldap://openldap.ldap.svc.cluster.local:389")
     base_dn = setup_info.get("LDAP_BASE_DN", "dc=devops,dc=local")
     admin_dn = setup_info.get("LDAP_ADMIN_DN", "cn=admin,dc=devops,dc=local")
     admin_pw = setup_info.get("LDAP_ADMIN_PASSWORD", "ldap-admin-2026")
     cmd = (
-        f"kubectl exec -n ldap {ldap_pod} -- ldapsearch -x "
+        f"ldapsearch -LLL -x -H {shlex.quote(ldap_uri)} "
         f"-D {shlex.quote(admin_dn)} -w {shlex.quote(admin_pw)} "
         f"-b {shlex.quote('cn=glitchtip-owners,ou=groups,' + base_dn)} uniqueMember"
     )

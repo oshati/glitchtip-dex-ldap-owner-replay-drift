@@ -13,6 +13,7 @@ RUN mkdir -p /var/lib/rancher/k3s/agent/images && \
     apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       -o Dpkg::Options::="--force-confold" \
+      ldap-utils \
       skopeo && \
     skopeo copy --override-os linux --override-arch amd64 \
       docker://docker.io/dexidp/dex:v2.41.1 \

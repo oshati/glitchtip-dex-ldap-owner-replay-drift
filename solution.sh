@@ -5,6 +5,7 @@ export KUBECONFIG=/home/ubuntu/.kube/config
 
 ORG_SLUG="devops-platform"
 GT_DB_PASS="7KkJeWZYkK"
+LDAP_URI="ldap://openldap.ldap.svc.cluster.local:389"
 LDAP_BASE_DN="dc=devops,dc=local"
 LDAP_ADMIN_DN="cn=admin,dc=devops,dc=local"
 
@@ -17,7 +18,6 @@ kubectl get configmap dex-connector-bootstrap-archive -n dex >/dev/null
 
 PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
 REDIS_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-runtime-cache -o jsonpath='{.items[0].metadata.name}')
-LDAP_POD=$(kubectl get pods -n ldap -l app=openldap -o jsonpath='{.items[0].metadata.name}')
 LDAP_ADMIN_PASSWORD=$(kubectl get deployment openldap -n ldap -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LDAP_ADMIN_PASSWORD")].value}')
 
 gt_sql() {
@@ -30,7 +30,7 @@ redis_cli() {
 
 ldap_group_users() {
   local group="$1"
-  kubectl exec -n ldap "${LDAP_POD}" -- ldapsearch -x \
+  ldapsearch -LLL -x -H "${LDAP_URI}" \
     -D "${LDAP_ADMIN_DN}" -w "${LDAP_ADMIN_PASSWORD}" \
     -b "cn=${group},ou=groups,${LDAP_BASE_DN}" uniqueMember 2>/dev/null \
     | sed -n 's/^uniqueMember: uid=\([^,]*\),.*/\1/p' | sort -u
