@@ -99,6 +99,12 @@ wait_for_pod_ready() {
 echo "[setup] Waiting for GlitchTip..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=glitchtip -n glitchtip --timeout=300s 2>/dev/null || true
 
+echo "[setup] Ensuring GlitchTip stateful dependencies are running..."
+kubectl scale statefulset glitchtip-postgresql -n glitchtip --replicas=1 >/dev/null 2>&1 || true
+kubectl scale statefulset glitchtip-valkey-primary -n glitchtip --replicas=1 >/dev/null 2>&1 || true
+kubectl wait --for=condition=ready pod/glitchtip-postgresql-0 -n glitchtip --timeout=300s
+kubectl wait --for=condition=ready pod/glitchtip-valkey-primary-0 -n glitchtip --timeout=300s
+
 for i in $(seq 1 60); do
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GLITCHTIP_URL}" 2>/dev/null || echo "000")
   if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
