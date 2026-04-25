@@ -73,18 +73,6 @@ kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glitchtip-runtime-directory-v2
-  namespace: glitchtip
-data:
-  directory-sync.txt: |
-${OWNER_DIRECTORY_BLOCK}
-  notes.md: |
-    Current runtime directory rebuilt from the Dex/LDAP owner group.
-EOF
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: dex-connector-bootstrap-archive
   namespace: dex
 data:
