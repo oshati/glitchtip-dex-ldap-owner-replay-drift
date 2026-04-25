@@ -36,41 +36,72 @@ ldap_group_users() {
     | sed -n 's/^uniqueMember: uid=\([^,]*\),.*/\1/p' | sort -u
 }
 
-OWNER_USERS=$(ldap_group_users glitchtip-owners | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-ALL_USERS=$(ldap_group_users glitchtip-users | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-MEMBER_USERS=""
-for username in ${ALL_USERS}; do
-  case " ${OWNER_USERS} " in
-    *" ${username} "*) ;;
-    *) MEMBER_USERS="${MEMBER_USERS} ${username}" ;;
-  esac
+mapfile -t OWNER_USERS < <(ldap_group_users glitchtip-owners)
+mapfile -t ALL_USERS < <(ldap_group_users glitchtip-users)
+MEMBER_USERS=()
+for username in "${ALL_USERS[@]}"; do
+  is_owner=0
+  for owner in "${OWNER_USERS[@]}"; do
+    if [ "${owner}" = "${username}" ]; then
+      is_owner=1
+      break
+    fi
+  done
+  if [ "${is_owner}" -eq 0 ]; then
+    MEMBER_USERS+=("${username}")
+  fi
 done
-MEMBER_USERS=$(echo "${MEMBER_USERS}" | xargs)
 
-echo "[solution] LDAP-designated owners: ${OWNER_USERS}"
-echo "[solution] LDAP-designated non-owner users: ${MEMBER_USERS}"
+echo "[solution] LDAP-designated owners: ${OWNER_USERS[*]}"
+echo "[solution] LDAP-designated non-owner users: ${MEMBER_USERS[*]}"
 
 echo "[solution] Correcting both the live runtime directory and the Dex-side archived baseline..."
-OWNER_DIRECTORY_LITERAL=$(printf '%s\n' ${OWNER_USERS})
-kubectl create configmap glitchtip-runtime-directory \
-  -n glitchtip \
-  --from-literal=directory-sync.txt="${OWNER_DIRECTORY_LITERAL}" \
-  --from-literal=notes.md="Current runtime directory rebuilt from the Dex/LDAP owner group." \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl create configmap dex-connector-bootstrap-archive \
-  -n dex \
-  --from-literal=directory-sync.txt="${OWNER_DIRECTORY_LITERAL}" \
-  --from-literal=notes.md="Connector archive aligned to current Dex/LDAP owner truth." \
-  --dry-run=client -o yaml | kubectl apply -f -
+OWNER_DIRECTORY_BLOCK=$(printf '    %s\n' "${OWNER_USERS[@]}")
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-runtime-directory
+  namespace: glitchtip
+data:
+  directory-sync.txt: |
+${OWNER_DIRECTORY_BLOCK}
+  notes.md: |
+    Current runtime directory rebuilt from the Dex/LDAP owner group.
+EOF
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-runtime-directory-v2
+  namespace: glitchtip
+data:
+  directory-sync.txt: |
+${OWNER_DIRECTORY_BLOCK}
+  notes.md: |
+    Current runtime directory rebuilt from the Dex/LDAP owner group.
+EOF
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-connector-bootstrap-archive
+  namespace: dex
+data:
+  directory-sync.txt: |
+${OWNER_DIRECTORY_BLOCK}
+  notes.md: |
+    Connector archive aligned to current Dex/LDAP owner truth.
+EOF
 
 echo "[solution] Rebuilding Redis replay and session state from current identity truth..."
 redis_cli DEL "gt:org:${ORG_SLUG}:warm-owners" >/dev/null
-for username in ${OWNER_USERS}; do
+for username in "${OWNER_USERS[@]}"; do
   redis_cli SADD "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null
   redis_cli SET "gt:principal:${username}:session-role" owner >/dev/null
   redis_cli SET "gt:principal:${username}:effective-role" owner >/dev/null
 done
-for username in ${MEMBER_USERS}; do
+for username in "${MEMBER_USERS[@]}"; do
   redis_cli SREM "gt:org:${ORG_SLUG}:warm-owners" "${username}" >/dev/null || true
   redis_cli DEL "gt:principal:${username}:session-role" "gt:principal:${username}:effective-role" >/dev/null || true
 done
@@ -78,7 +109,7 @@ redis_cli SET gt:warm:last-source "corrected-dex-ldap-truth" >/dev/null
 
 echo "[solution] Repairing durable GlitchTip organization roles..."
 ORG_ID=$(gt_sql "SELECT id FROM organizations_ext_organization WHERE slug='${ORG_SLUG}' LIMIT 1;")
-for username in ${OWNER_USERS}; do
+for username in "${OWNER_USERS[@]}"; do
   USER_ID=$(gt_sql "SELECT id FROM users_user WHERE email='${username}@devops.local' LIMIT 1;")
   if [ -n "${USER_ID}" ] && [ -n "${ORG_ID}" ]; then
     EXISTS=$(gt_sql "SELECT COUNT(*) FROM organizations_ext_organizationuser WHERE user_id=${USER_ID} AND organization_id=${ORG_ID};")
@@ -90,7 +121,7 @@ for username in ${OWNER_USERS}; do
   fi
 done
 
-for username in ${MEMBER_USERS}; do
+for username in "${MEMBER_USERS[@]}"; do
   gt_sql "UPDATE organizations_ext_organizationuser SET role=0, modified=NOW() WHERE user_id=(SELECT id FROM users_user WHERE email='${username}@devops.local') AND organization_id=${ORG_ID};" >/dev/null
 done
 
@@ -109,7 +140,7 @@ if kubectl get cronjob glitchtip-session-profile-rollup -n glitchtip >/dev/null 
 fi
 
 echo "[solution] Reasserting final safe state after replay verification..."
-for username in ${MEMBER_USERS}; do
+for username in "${MEMBER_USERS[@]}"; do
   redis_cli DEL "gt:principal:${username}:session-role" "gt:principal:${username}:effective-role" >/dev/null || true
   gt_sql "UPDATE organizations_ext_organizationuser SET role=0, modified=NOW() WHERE user_id=(SELECT id FROM users_user WHERE email='${username}@devops.local') AND organization_id=${ORG_ID};" >/dev/null
 done
