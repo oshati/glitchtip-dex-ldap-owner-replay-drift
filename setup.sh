@@ -501,7 +501,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: docker.io/redis:7-alpine
+        image: docker.io/redis:7
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 6379
@@ -651,7 +651,7 @@ spec:
             emptyDir: {}
           initContainers:
           - name: copy-redis-cli
-            image: docker.io/redis:7-alpine
+            image: docker.io/redis:7
             imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "-c", "cp /usr/local/bin/redis-cli /tools/redis-cli && chmod +x /tools/redis-cli"]
             volumeMounts:

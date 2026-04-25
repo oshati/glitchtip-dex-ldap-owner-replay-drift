@@ -25,8 +25,8 @@ RUN mkdir -p /var/lib/rancher/k3s/agent/images && \
       docker://docker.io/bitnamilegacy/postgresql:17.0.0-debian-12-r11 \
       docker-archive:/var/lib/rancher/k3s/agent/images/postgresql.tar:docker.io/bitnamilegacy/postgresql:17.0.0-debian-12-r11 && \
     skopeo copy --override-os linux --override-arch amd64 \
-      docker://docker.io/redis:7-alpine \
-      docker-archive:/var/lib/rancher/k3s/agent/images/redis.tar:docker.io/redis:7-alpine && \
+      docker://docker.io/redis:7 \
+      docker-archive:/var/lib/rancher/k3s/agent/images/redis.tar:docker.io/redis:7 && \
     skopeo copy --override-os linux --override-arch amd64 \
       docker://docker.io/curlimages/curl:8.7.1 \
       docker-archive:/var/lib/rancher/k3s/agent/images/curl.tar:docker.io/curlimages/curl:8.7.1 && \
