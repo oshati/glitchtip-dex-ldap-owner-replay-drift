@@ -21,6 +21,11 @@ prompt: |
   authorization path, not just in Dex, LDAP, or one stale row in the
   application database.
 
+  Two current platform operators still authenticate through the shared
+  Dex/LDAP path and are expected to remain legitimate owners after the repair.
+  The intended fix should preserve that supported owner path rather than
+  collapsing the whole organization onto the local Django superuser account.
+
   [TASK]
   Investigate the active GlitchTip access flow and restore the intended
   runtime authorization boundary.
@@ -35,6 +40,11 @@ prompt: |
   ground truth. A few earlier repairs looked right for a moment and then
   quietly drifted back, so make sure the fix survives the current automation
   instead of only correcting one snapshot of the system.
+
+  The runtime replay/cache path is still part of the supported topology. Fix
+  the stale replay behavior and its source material in place; do not solve the
+  incident by tearing out supported services that legitimate owner flows still
+  depend on.
 
   Also make sure the result is true for both existing over-privileged accounts
   and fresh SSO logins. It is not enough to update one layer if GlitchTip can

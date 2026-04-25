@@ -847,6 +847,12 @@ data:
     Dex and LDAP should be checked, but recent evidence suggests incoming LDAP
     group truth is no longer the obvious problem. Watch for state that survives
     org membership cleanup and then replays old owner decisions.
+    Current GlitchTip operations coverage still belongs to mira and noah, and
+    their Dex/LDAP-backed sign-ins are supposed to remain owner-capable after
+    the repair.
+    Treat the runtime replay cache as supported infrastructure. The bug is the
+    stale replay material and replay logic, not the mere existence of the
+    cache-backed path.
 EOF
 
 echo "[setup] Running the broken replay once..."
