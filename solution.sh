@@ -82,6 +82,18 @@ ${OWNER_DIRECTORY_BLOCK}
     Connector archive aligned to current Dex/LDAP owner truth.
 EOF
 
+echo "[solution] Updating the runtime replay job to stamp the corrected source..."
+ROLLUP_SCRIPT_FILE=$(mktemp)
+kubectl get configmap glitchtip-session-rollup-script \
+  -n glitchtip \
+  -o go-template='{{ index .data "replay.sh" }}' > "${ROLLUP_SCRIPT_FILE}"
+sed -i 's/directory-bootstrap/corrected-dex-ldap-truth/g' "${ROLLUP_SCRIPT_FILE}"
+kubectl create configmap glitchtip-session-rollup-script \
+  -n glitchtip \
+  --from-file=replay.sh="${ROLLUP_SCRIPT_FILE}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+rm -f "${ROLLUP_SCRIPT_FILE}"
+
 echo "[solution] Rebuilding Redis replay and session state from current identity truth..."
 redis_cli DEL "gt:org:${ORG_SLUG}:warm-owners" >/dev/null
 for username in "${OWNER_USERS[@]}"; do
