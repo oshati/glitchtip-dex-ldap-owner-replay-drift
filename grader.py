@@ -285,7 +285,7 @@ def redis_smembers(key):
     rc, out, err = redis_cmd("SMEMBERS", key)
     if rc != 0:
         return None, err or out
-    return sorted([line.strip() for line in out.splitlines() if line.strip()])
+    return sorted([line.strip() for line in out.splitlines() if line.strip()]), ""
 
 
 def get_configmap_multiline(namespace, name, key):
